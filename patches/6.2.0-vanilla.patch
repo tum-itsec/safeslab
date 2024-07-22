@@ -1,0 +1,163 @@
+diff --git a/mm/Kconfig b/mm/Kconfig
+index ff7b209dec05..364fd1ec51cc 100644
+--- a/mm/Kconfig
++++ b/mm/Kconfig
+@@ -290,6 +290,11 @@ config SLAB_FREELIST_HARDENED
+ 	  sanity-checking than others. This option is most effective with
+ 	  CONFIG_SLUB.
+ 
++config SAFESLAB_MEMBENCH
++       default n
++       bool "Enable for collecting memory consumption statistics"
++       depends on SLUB && !SLUB_TINY
++
+ config SLUB_STATS
+ 	default n
+ 	bool "Enable SLUB performance statistics"
+diff --git a/mm/slab_common.c b/mm/slab_common.c
+index 1cba98acc486..abee21d7aaa4 100644
+--- a/mm/slab_common.c
++++ b/mm/slab_common.c
+@@ -1099,7 +1099,6 @@ gfp_t kmalloc_fix_flags(gfp_t flags)
+  * directly to the page allocator. We use __GFP_COMP, because we will need to
+  * know the allocation order to free the pages properly in kfree.
+  */
+-
+ static void *__kmalloc_large_node(size_t size, gfp_t flags, int node)
+ {
+ 	struct page *page;
+diff --git a/mm/slub.c b/mm/slub.c
+index 13459c69095a..1ae4121742d7 100644
+--- a/mm/slub.c
++++ b/mm/slub.c
+@@ -237,6 +237,23 @@ static inline bool kmem_cache_has_cpu_partial(struct kmem_cache *s)
+ #endif
+ }
+ 
++#ifdef CONFIG_SAFESLAB_MEMBENCH
++long long slub_max_rss = 0;
++EXPORT_SYMBOL(slub_max_rss);
++
++long long slub_rss = 0;
++EXPORT_SYMBOL(slub_rss);
++
++unsigned long long slub_total_page_allocations = 0;
++EXPORT_SYMBOL(slub_total_page_allocations);
++
++unsigned long long slub_total_page_frees_norcu = 0;
++EXPORT_SYMBOL(slub_total_page_frees_norcu);
++
++unsigned long long slub_total_page_frees_rcu = 0;
++EXPORT_SYMBOL(slub_total_page_frees_rcu);
++#endif
++
+ /*
+  * Issues still to be resolved:
+  *
+@@ -1855,6 +1872,14 @@ static inline struct slab *alloc_slab_page(gfp_t flags, int node,
+ 	if (!folio)
+ 		return NULL;
+ 
++#ifdef CONFIG_SAFESLAB_MEMBENCH
++	slub_total_page_allocations += 1 << order;
++	
++	slub_rss += 1 << order;
++	if (slub_rss > slub_max_rss)
++		slub_max_rss = slub_rss;
++#endif
++	
+ 	slab = folio_slab(folio);
+ 	__folio_set_slab(folio);
+ 	/* Make the flag visible before any changes to folio->mapping */
+@@ -2086,10 +2111,22 @@ static void free_slab(struct kmem_cache *s, struct slab *slab)
+ 			check_object(s, slab, p, SLUB_RED_INACTIVE);
+ 	}
+ 
+-	if (unlikely(s->flags & SLAB_TYPESAFE_BY_RCU))
++	if (unlikely(s->flags & SLAB_TYPESAFE_BY_RCU)) {
++#ifdef CONFIG_SAFESLAB_MEMBENCH
++		slub_total_page_frees_rcu += 1 << slab_order(slab);
++		slub_rss -= 1 << slab_order(slab);
++#endif
++
+ 		call_rcu(&slab->rcu_head, rcu_free_slab);
+-	else
++	}
++	else {
++#ifdef CONFIG_SAFESLAB_MEMBENCH
++		slub_total_page_frees_norcu += 1 << slab_order(slab);
++		slub_rss -= 1 << slab_order(slab);
++#endif
++
+ 		__free_slab(s, slab);
++	}
+ }
+ 
+ static void discard_slab(struct kmem_cache *s, struct slab *slab)
+diff --git a/slub-membench/Makefile b/slub-membench/Makefile
+new file mode 100644
+index 000000000000..4a11ba7d128c
+--- /dev/null
++++ b/slub-membench/Makefile
+@@ -0,0 +1,9 @@
++KERNEL= ..
++
++obj-m += slub_membench.o
++
++all:
++	make -C $(KERNEL) M=$(PWD) modules
++
++clean:
++	make -C $(KERNEL) M=$(PWD) clean
+diff --git a/slub-membench/slub_membench.c b/slub-membench/slub_membench.c
+new file mode 100644
+index 000000000000..b7fcd8e4cb06
+--- /dev/null
++++ b/slub-membench/slub_membench.c
+@@ -0,0 +1,46 @@
++#include <linux/kallsyms.h>
++#include <../mm/slab.h>
++#include <linux/slub_def.h>
++
++// Module metadata
++MODULE_AUTHOR("Safeslab");
++MODULE_DESCRIPTION("SLUB memory overhead experiment module");
++MODULE_LICENSE("GPL");
++
++#define DEBUG
++
++#ifdef DEBUG
++#define test_printk(fmt, ...) printk(" " #fmt, ##__VA_ARGS__)
++#else
++#define test_printk(fmt, ...) (void)fmt
++#endif
++
++extern long long slub_max_rss;
++extern long long slub_rss;
++extern unsigned long long slub_total_page_allocations;
++extern unsigned long long slub_total_page_frees_norcu;
++extern unsigned long long slub_total_page_frees_rcu;
++
++static __init int slub_membench_init(void)
++{
++	printk("[SLUB MEMBENCH]: %-10lld max RSS by SLUB\n", slub_max_rss);
++	printk("[SLUB MEMBENCH]: %-10lld total page allocations by SLUB\n", slub_total_page_allocations);
++	printk("[SLUB MEMBENCH]: %-10lld total page frees w/o RCU by SLUB\n", slub_total_page_frees_norcu);
++	printk("[SLUB MEMBENCH]: %-10lld total page frees w/ RCU by SLUB\n", slub_total_page_frees_rcu);
++	printk("[SLUB MEMBENCH]: =====================================================\n");
++
++	slub_max_rss = 0;
++	slub_rss = 0;
++	slub_total_page_allocations = 0;
++	slub_total_page_frees_norcu = 0;
++	slub_total_page_frees_rcu = 0;
++
++	return 0;
++}
++
++static __exit void slub_membench_exit(void)
++{
++}
++
++module_init(slub_membench_init);
++module_exit(slub_membench_exit);

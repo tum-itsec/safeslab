@@ -1,0 +1,6 @@
+build/*
+results/*
+
+*.swp
+
+prebuilt.tar.gz
