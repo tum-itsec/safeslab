@@ -1,0 +1,45 @@
+#!/bin/bash
+
+# import cookie-cutter functions
+source "$(dirname "${0}")"/common.sh
+
+print_usage()
+{
+    cat 1>&2 <<EOF
+Usage: ${0} action [options]
+
+Actions:
+  build     build components of Safeslab 
+  clean     clean components of Safeslab
+  run       run tests and benchmarks
+  help      print this help menu
+
+Options for a given action can be found by running the action with 'help' as
+the option. For example:
+
+$ ${0} build help
+EOF
+}
+
+main()
+{
+    local key
+
+    # check for command line arguments
+    if [[ ${#} == 0 ]]; then
+        print_usage
+        exit 1
+    fi
+
+    key="${1}"
+    shift
+    case "${key}" in
+        build ) ${BUILD_SCRIPT} ${@} ;;
+        run   ) ${RUN_SCRIPT}   ${@} ;;
+        clean ) ${CLEAN_SCRIPT} ${@} ;;
+        debug ) ${DEBUG_SCRIPT} ${@} ;;
+        help | -h | --help ) print_usage; exit 0 ;;
+        * ) do_error "Invalid argument: ${1}."   ;;
+    esac
+}
+main ${@}
